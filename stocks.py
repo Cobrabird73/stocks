@@ -2,85 +2,94 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 
-# --- APP CONFIG ---
-st.set_page_config(page_title="Stock & Dividend Tracker", layout="wide")
+st.set_page_config(page_title="Pro Stock Tracker", layout="wide")
 
-st.title("📈 Stock Gains vs. Live Market")
-st.markdown("Compare your initial investment and dividends against real-time market data.")
-
-# --- SIDEBAR: PORTFOLIO INPUT ---
-st.sidebar.header("Add to Portfolio")
-with st.sidebar.form("input_form", clear_on_submit=True):
-    ticker = st.text_input("Ticker Symbol (e.g., AAPL, TSLA)").upper()
-    shares = st.number_input("Number of Shares", min_value=0.0, step=1.0)
-    buy_price = st.number_input("Average Buy Price ($)", min_value=0.0, step=0.01)
-    total_dividends = st.number_input("Total Dividends Received ($)", min_value=0.0, step=0.01)
-    add_data = st.form_submit_button("Add Stock")
-
-# Initialize portfolio in session state
+# --- INITIALIZE PORTFOLIO ---
+# We store the portfolio as a dictionary { Ticker: {Shares, Buy Price, Dividends} }
 if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = []
+    st.session_state.portfolio = {}
 
-if add_data and ticker:
-    st.session_state.portfolio.append({
-        "Ticker": ticker,
-        "Shares": shares,
-        "Buy Price": buy_price,
-        "Dividends": total_dividends
-    })
+st.title("📈 Pro Stock & Dividend Tracker")
 
-# --- DATA PROCESSING ---
+# --- SIDEBAR: ADD NEW STOCK ---
+st.sidebar.header("Add New Holding")
+with st.sidebar.form("input_form", clear_on_submit=True):
+    new_ticker = st.text_input("Ticker Symbol").upper().strip()
+    new_shares = st.number_input("Shares", min_value=0.0, step=0.1)
+    new_buy_price = st.number_input("Avg Buy Price ($)", min_value=0.0, step=0.01)
+    new_divs = st.number_input("Total Divs Received ($)", min_value=0.0, step=0.01)
+    if st.form_submit_button("Add to Portfolio"):
+        if new_ticker:
+            st.session_state.portfolio[new_ticker] = {
+                "Shares": new_shares,
+                "Buy Price": new_buy_price,
+                "Dividends": new_divs
+            }
+            st.rerun()
+
+# --- MAIN LOGIC ---
 if st.session_state.portfolio:
-    df = pd.DataFrame(st.session_state.portfolio)
-    
-    def get_live_data(symbol):
-        try:
-            stock = yf.Ticker(symbol)
-            # Fetch the most recent closing price
-            price = stock.fast_info['last_price']
-            return round(price, 2)
-        except:
-            return 0.0
+    # Convert dict to DataFrame for processing
+    df = pd.DataFrame.from_dict(st.session_state.portfolio, orient='index').reset_index()
+    df.columns = ['Ticker', 'Shares', 'Buy Price', 'Dividends']
 
-    with st.spinner('Fetching live market prices...'):
-        df['Current Price'] = df['Ticker'].apply(get_live_data)
+    # Fetch Live Prices
+    with st.spinner('Updating Market Prices...'):
+        def fetch_price(t):
+            try: return round(yf.Ticker(t).fast_info['last_price'], 2)
+            except: return 0.0
+        df['Current Price'] = df['Ticker'].apply(fetch_price)
 
     # Calculations
     df['Cost Basis'] = df['Shares'] * df['Buy Price']
     df['Current Value'] = df['Shares'] * df['Current Price']
-    df['Price Gain/Loss'] = df['Current Value'] - df['Cost Basis']
-    df['Total Gain ($)'] = df['Price Gain/Loss'] + df['Dividends']
-    df['ROI (%)'] = (df['Total Gain ($)'] / df['Cost Basis']) * 100
-
-    # --- DASHBOARD METRICS ---
-    total_invested = df['Cost Basis'].sum()
-    total_value = df['Current Value'].sum()
-    total_divs = df['Dividends'].sum()
-    net_gain = (total_value + total_divs) - total_invested
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Invested", f"${total_invested:,.2f}")
-    col2.metric("Portfolio Value", f"${total_value:,.2f}")
-    col3.metric("Dividends Collected", f"${total_divs:,.2f}")
-    col4.metric("Net Total Gain", f"${net_gain:,.2f}", delta=f"{((net_gain/total_invested)*100):.2f}%" if total_invested > 0 else None)
+    df['Gain/Loss'] = (df['Current Value'] - df['Cost Basis']) + df['Dividends']
+    
+    # Display Metrics
+    total_cost = df['Cost Basis'].sum()
+    total_val = df['Current Value'].sum()
+    total_div = df['Dividends'].sum()
+    net = (total_val + total_div) - total_cost
+    
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Invested", f"${total_cost:,.2f}")
+    m2.metric("Market Value", f"${total_val:,.2f}")
+    m3.metric("Dividends", f"${total_div:,.2f}")
+    m4.metric("Total Return", f"${net:,.2f}", delta=f"{(net/total_cost*100 if total_cost>0 else 0):.2f}%")
 
     st.divider()
 
-    # --- PORTFOLIO TABLE ---
-    st.subheader("Your Holdings")
-    
-    # Styling the dataframe
-    def color_gains(val):
-        color = 'green' if val > 0 else 'red'
-        return f'color: {color}'
+    # --- EDIT / DELETE SECTION ---
+    st.subheader("📋 Manage Your Portfolio")
+    st.write("Edit values directly in the table or select a row to delete.")
 
-    st.dataframe(df.style.map(color_gains, subset=['Price Gain/Loss', 'Total Gain ($)', 'ROI (%)']))
+    # 1. Edit Logic using st.data_editor
+    # num_rows="dynamic" allows deleting rows by selecting them and pressing 'Delete'
+    edited_df = st.data_editor(
+        df[['Ticker', 'Shares', 'Buy Price', 'Dividends']], 
+        num_rows="dynamic",
+        key="portfolio_editor",
+        use_container_width=True
+    )
 
-    if st.button("Clear Portfolio"):
-        st.session_state.portfolio = []
+    # 2. Sync changes back to Session State
+    if st.button("Save Changes"):
+        # Rebuild the dictionary from the edited dataframe
+        new_portfolio = {}
+        for _, row in edited_df.iterrows():
+            if pd.notnull(row['Ticker']) and row['Ticker'] != "":
+                new_portfolio[row['Ticker']] = {
+                    "Shares": row['Shares'],
+                    "Buy Price": row['Buy Price'],
+                    "Dividends": row['Dividends']
+                }
+        st.session_state.portfolio = new_portfolio
+        st.success("Portfolio updated successfully!")
         st.rerun()
-else:
-    st.info("Your portfolio is empty. Use the sidebar to add stocks.")
 
-# --- FOOTER ---
-st.caption("Data provided by Yahoo Finance via yfinance library. Prices may be delayed.")
+    # Display Gain/Loss Table (Read Only)
+    st.subheader("📊 Performance Analysis")
+    st.dataframe(df[['Ticker', 'Current Price', 'Cost Basis', 'Gain/Loss']].style.highlight_max(axis=0))
+
+else:
+    st.info("Start by adding a ticker symbol in the sidebar.")
